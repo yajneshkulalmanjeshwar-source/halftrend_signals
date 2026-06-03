@@ -68,11 +68,14 @@ class AngelManager:
             correlation_id = "halftrend_stream_01"
             action = 1  # Subscribe Action ID
             mode = 3    # Snapquote data depth mode
-            token_list = [{"exchangeType": 1, "tokens": [Config.NIFTY_TOKEN]}]
+            # Ensure token is strictly a string for Angel One API compatibility
+            token_list = [{"exchangeType": 1, "tokens": [str(Config.NIFTY_TOKEN)]}]
             self.ws.subscribe(correlation_id, action, mode, token_list)
 
         def on_error(wsapp, error):
-            print(f"Streaming link socket error caught: {error}")
+            print(f"[ERROR] WebSocket connection failed: {error}")
+            import traceback
+            traceback.print_exc()
 
         self.ws.on_data = on_data
         self.ws.on_open = on_open
@@ -83,34 +86,57 @@ class AngelManager:
 
     def process_live_tick(self, tick_msg):
         """Builds and closes incoming live bars into the historical framework structure."""
-        if 'last_traded_price' not in tick_msg:
-            return
+        try:
+            # Handle heartbeat/ack messages that don't contain price data
+            if not isinstance(tick_msg, dict):
+                return
             
-        ltp = float(tick_msg['last_traded_price']) / 100.0  # Normalize decimal points if needed
-        tick_time = pd.Timestamp.now()
-        
-        # Round timestamps to group chunks depending on Config.INTERVAL
-        # Simple five-minute group bucket calculation representation:
-        candle_bucket = tick_time.floor('5min').strftime("%Y-%m-%d %H:%M")
+            if 'last_traded_price' not in tick_msg:
+                return
+            
+            # Safely extract and convert the last traded price
+            try:
+                ltp = float(tick_msg['last_traded_price']) / 100.0  # Normalize decimal points if needed
+            except (ValueError, TypeError) as e:
+                print(f"[WARN] Invalid price in tick message: {tick_msg.get('last_traded_price')} - {e}")
+                return
+            
+            tick_time = pd.Timestamp.now()
+            
+            # Round timestamps to group chunks depending on Config.INTERVAL
+            # Simple five-minute group bucket calculation representation:
+            candle_bucket = tick_time.floor('5min').strftime("%Y-%m-%d %H:%M")
 
-        if self.current_candle is None or self.current_candle['time'] != candle_bucket:
-            # Commit last finished live structure bar to history stream
-            if self.current_candle is not None:
-                new_row = pd.DataFrame([self.current_candle])
-                self.history_df = pd.concat([self.history_df, new_row], ignore_index=True)
-                # Keep cache slim
-                if len(self.history_df) > 500:
-                    self.history_df = self.history_df.iloc[1:].reset_index(drop=True)
+            if self.current_candle is None or self.current_candle['time'] != candle_bucket:
+                # Commit last finished live structure bar to history stream
+                if self.current_candle is not None:
+                    new_row = pd.DataFrame([self.current_candle])
+                    self.history_df = pd.concat([self.history_df, new_row], ignore_index=True)
+                    # Keep cache slim
+                    if len(self.history_df) > 500:
+                        self.history_df = self.history_df.iloc[1:].reset_index(drop=True)
+                    
+                    # Execute signal trigger processing check on completed closed bar
+                    try:
+                        self.on_signal_callback(self.history_df)
+                    except Exception as callback_error:
+                        print(f"[ERROR] Signal callback failed: {callback_error}")
+                        import traceback
+                        traceback.print_exc()
+
+                # Initialize tracking parameters for the new cycle timeframe
+                self.current_candle = {
+                    'time': candle_bucket, 'open': ltp, 'high': ltp, 'low': ltp, 'close': ltp, 'volume': 0
+                }
+            else:
+                # Update running high, low, and closing values on current bar tick
+                self.current_candle['high'] = max(self.current_candle['high'], ltp)
+                self.current_candle['low'] = min(self.current_candle['low'], ltp)
+                self.current_candle['close'] = ltp
                 
-                # Execute signal trigger processing check on completed closed bar
-                self.on_signal_callback(self.history_df)
-
-            # Initialize tracking parameters for the new cycle timeframe
-            self.current_candle = {
-                'time': candle_bucket, 'open': ltp, 'high': ltp, 'low': ltp, 'close': ltp, 'volume': 0
-            }
-        else:
-            # Update running high, low, and closing values on current bar tick
-            self.current_candle['high'] = max(self.current_candle['high'], ltp)
-            self.current_candle['low'] = min(self.current_candle['low'], ltp)
-            self.current_candle['close'] = ltp
+        except Exception as e:
+            print(f"[ERROR] Error processing live tick: {e}")
+            print(f"[DEBUG] Raw tick message: {tick_msg}")
+            import traceback
+            traceback.print_exc()
+            # Don't re-raise - we want the WebSocket thread to stay alive
