@@ -38,10 +38,19 @@ def fetch_data_with_retry():
         try:
             print(f"📊 Fetching {TICKER_SYMBOL}... (Attempt {attempt + 1}/{MAX_RETRIES})")
             nifty = yf.Ticker(TICKER_SYMBOL)
-            df = nifty.history(period="5d", interval="5m")
+            # Fetch 10 days to ensure sufficient warmup for ATR-100 calculation
+            df = nifty.history(period="10d", interval="5m")
             
             if df is not None and not df.empty:
-                print(f"✅ Data fetched: {len(df)} candles")
+                candle_count = len(df)
+                print(f"✅ Data fetched: {candle_count} candles")
+                # ATR needs 100 candles minimum for meaningful values
+                if candle_count < 100:
+                    print(f"⚠️ WARNING: Only {candle_count} candles. ATR warmup may not be complete (need 100+)")
+                elif candle_count < 150:
+                    print(f"⚠️ NOTE: {candle_count} candles. Signals valid but not fully warmed up (optimal: 200+)")
+                else:
+                    print(f"✅ OPTIMAL: {candle_count} candles. Signals are reliable.")
                 return df
             else:
                 # Market closed or no data - this is normal during off-hours

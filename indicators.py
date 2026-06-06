@@ -9,13 +9,14 @@ def calculate_half_trend(df: pd.DataFrame, amplitude: int = 10, channel_deviatio
     # Ensure columns are lowercase
     df.columns = [col.lower() for col in df.columns]
     
-    # Calculate ATR (Average True Range)
+    # Calculate ATR (Average True Range) - requires 100 candles minimum for meaningful values
     df['prev_close'] = df['close'].shift(1)
     df['tr0'] = abs(df['high'] - df['low'])
     df['tr1'] = abs(df['high'] - df['prev_close'])
     df['tr2'] = abs(df['low'] - df['prev_close'])
     df['tr'] = df[['tr0', 'tr1', 'tr2']].max(axis=1)
-    df['atr'] = df['tr'].rolling(window=100).mean()  # Standard ATR lookback
+    df['atr'] = df['tr'].rolling(window=100).mean()  # ATR-100: requires 100 candles to warm up
+    # Note: Signals before candle #100 may be unreliable as ATR is still calculating
     
     # HalfTrend logic setup
     df['trend'] = 0
