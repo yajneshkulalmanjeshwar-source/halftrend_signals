@@ -12,15 +12,19 @@
 name: Market Bot
 
 on:
-  schedule:
-    # UTC 03:00–10:30 Mon–Fri covers 09:15–15:30 IST (India has no DST)
-    - cron: "*/5 3-10 * * 1-5"
+  # Manual run: Actions → Market Bot → Run workflow (top right)
   workflow_dispatch:
     inputs:
       force_alert:
         description: "Send a test ntfy alert"
         type: boolean
-        default: false
+        default: true
+  # Auto-run when you push to main (helps first-time setup)
+  push:
+    branches: [main]
+  schedule:
+    # UTC 03:00–10:30 Mon–Fri covers 09:15–15:30 IST (India has no DST)
+    - cron: "*/5 3-10 * * 1-5"
 
 jobs:
   halftrend:
