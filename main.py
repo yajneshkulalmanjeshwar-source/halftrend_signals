@@ -3,6 +3,7 @@ import threading
 import requests
 import pandas as pd
 import yfinance as yf
+from datetime import datetime, timedelta
 from fastapi import FastAPI
 from indicators import calculate_half_trend
 
@@ -11,12 +12,52 @@ app = FastAPI()
 # --- CONFIGURATION ---
 NTFY_TOPIC = "halftrend_signals"  # Replace with your actual ntfy app topic name
 TICKER_SYMBOL = "^NSEI"  # Yahoo Finance symbol for Nifty 50
-CHECK_INTERVAL_SECONDS = 300  # Check every 5 minutes
+CANDLE_INTERVAL_MINUTES = 5  # Check every 5 minutes aligned with market candles
 MAX_RETRIES = 3
 RETRY_DELAY_BASE = 2  # Start with 2 seconds for quick retries
 
 # Global variable to remember the last signal time so it doesn't spam you
 last_signal_time = None
+
+def get_next_candle_close_time():
+    """
+    Calculates the next 5-minute market candle close time.
+    Market candles close at: 9:15, 9:20, 9:25, 9:30, etc.
+    """
+    now = datetime.now()
+    
+    # Round to next 5-minute boundary
+    minutes = now.minute
+    seconds = now.second
+    microseconds = now.microsecond
+    
+    # Calculate minutes to next 5-minute boundary
+    minutes_to_next = (5 - (minutes % 5)) % 5
+    
+    if minutes_to_next == 0 and seconds == 0 and microseconds == 0:
+        # We're exactly on a boundary
+        next_close = now + timedelta(minutes=5)
+    elif minutes_to_next == 0:
+        # Same 5-minute block but need to wait for the close
+        next_close = now.replace(second=0, microsecond=0) + timedelta(minutes=5)
+    else:
+        # Wait for the next 5-minute boundary
+        next_close = now.replace(second=0, microsecond=0) + timedelta(minutes=minutes_to_next)
+    
+    return next_close
+
+def wait_for_next_candle_close():
+    """
+    Waits until the next market candle close time, then returns.
+    """
+    next_close = get_next_candle_close_time()
+    wait_seconds = (next_close - datetime.now()).total_seconds()
+    
+    if wait_seconds > 0:
+        print(f"⏰ Waiting {wait_seconds:.1f}s until candle close at {next_close.strftime('%H:%M:%S')}")
+        time.sleep(wait_seconds)
+    
+    return next_close
 
 def send_alert(message: str, is_buy: bool):
     """Sends a push notification to your iPhone via ntfy."""
@@ -83,15 +124,19 @@ def fetch_data_with_retry():
     return None
 
 def run_trading_bot():
-    """Background loop that fetches data, checks HalfTrend, and sends alerts."""
+    """Background loop that fetches data at market candle close times and checks HalfTrend."""
     global last_signal_time
     
     # Small initial delay to allow server to stabilize
-    print("⏳ Starting trading bot... (Initial 5 second delay)")
+    print("⏳ Starting trading bot... (syncing with market candle times)")
     time.sleep(5)
     
     while True:
         try:
+            # Wait for the next market candle close time
+            candle_close_time = wait_for_next_candle_close()
+            print(f"\n🔔 Candle closed at {candle_close_time.strftime('%H:%M:%S')}")
+            
             df = fetch_data_with_retry()
             
             if df is not None and not df.empty:
@@ -128,10 +173,6 @@ def run_trading_bot():
             print(f"❌ Error in trading loop: {e}")
             import traceback
             traceback.print_exc()
-            
-        # Sleep until the next 5-minute check
-        print(f"⏰ Next check in {CHECK_INTERVAL_SECONDS} seconds...\n")
-        time.sleep(CHECK_INTERVAL_SECONDS)
 
 # --- FASTAPI ENDPOINTS ---
 
@@ -144,7 +185,7 @@ def startup_event():
 
 @app.get("/")
 def read_root():
-    return {"status": "Bot is running perfectly on Yahoo Finance.", "interval": "5 minutes"}
+    return {"status": "Bot is running perfectly on Yahoo Finance.", "interval": "5 minutes (synced with market candle close)", "next_close": str(get_next_candle_close_time())}
 
 @app.get("/ping")
 def ping():
