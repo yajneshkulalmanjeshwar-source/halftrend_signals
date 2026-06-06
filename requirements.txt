@@ -1,13 +1,9 @@
-SmartApi-python
-pyotp
 fastapi
 uvicorn
 requests
-python-dotenv
 pandas
 numpy
-logzero
-websocket-client
+yfinance
 
 
 
