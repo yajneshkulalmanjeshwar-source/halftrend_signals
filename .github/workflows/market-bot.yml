@@ -1,0 +1,56 @@
+# HalfTrend bot — runs every 5 min on weekdays (IST market window checked in bot.py)
+#
+# GitHub repo → Settings → Secrets and variables → Actions → New repository secret:
+#   ANGEL_API_KEY        SmartAPI app key (smartapi.angelone.in)
+#   ANGEL_CLIENT_CODE    Angel One client ID
+#   ANGEL_PIN            Trading PIN / MPIN
+#   ANGEL_TOTP_SECRET    TOTP secret from enable-totp (not the 6-digit code)
+#   NTFY_TOPIC           Your ntfy.sh topic name
+#
+# Manual test: Actions tab → Market Bot → Run workflow → check "Force test alert"
+
+name: Market Bot
+
+on:
+  schedule:
+    # UTC 03:00–10:30 Mon–Fri covers 09:15–15:30 IST (India has no DST)
+    - cron: "*/5 3-10 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      force_alert:
+        description: "Send a test ntfy alert"
+        type: boolean
+        default: false
+
+jobs:
+  halftrend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore signal state
+        uses: actions/cache@v4
+        with:
+          path: .bot_state.json
+          key: halftrend-bot-state
+
+      - name: Run HalfTrend bot
+        env:
+          ANGEL_API_KEY: ${{ secrets.ANGEL_API_KEY }}
+          ANGEL_CLIENT_CODE: ${{ secrets.ANGEL_CLIENT_CODE }}
+          ANGEL_PIN: ${{ secrets.ANGEL_PIN }}
+          ANGEL_TOTP_SECRET: ${{ secrets.ANGEL_TOTP_SECRET }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          FORCE_ALERT: ${{ github.event.inputs.force_alert }}
+          BOT_STATE_FILE: .bot_state.json
+        run: python bot.py
