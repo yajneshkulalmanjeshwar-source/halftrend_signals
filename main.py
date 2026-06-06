@@ -1,16 +1,17 @@
 import asyncio
 import requests
 import pandas as pd
-import yfinance as yf
 from datetime import datetime, timedelta
 from fastapi import FastAPI
+from tvdatafeed import TvDatafeed, Interval
 from indicators import calculate_half_trend
 
 app = FastAPI()
 
 # --- CONFIGURATION ---
-NTFY_TOPIC = "my_secret_nifty_bot_88"  # Replace with your actual ntfy app topic name
-TICKER_SYMBOL = "^NSEI"  # Yahoo Finance symbol for Nifty 50
+NTFY_TOPIC = "my_secret_nifty_bot_88"  # Your ntfy app topic name
+TV_SYMBOL = "NIFTY"                    # TradingView symbol
+TV_EXCHANGE = "NSE"                    # TradingView exchange
 
 last_signal_time = None
 
@@ -32,19 +33,11 @@ async def run_trading_bot():
     """Asynchronous loop that syncs perfectly with 5-minute candle closes."""
     global last_signal_time
     
-    # --- ANTI-RATE LIMIT FIX ---
-    # 1. Create a persistent session so we don't spam Yahoo for new cookies
-    session = requests.Session()
-    # 2. Spoof a real web browser to bypass Yahoo's bot detection
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
-    })
-    
-    # 3. Initialize the Ticker OUTSIDE the loop
-    print(f"🔐 Initializing Ticker with persistent session...")
-    nifty = yf.Ticker(TICKER_SYMBOL, session=session)
+    # --- TRADINGVIEW INITIALIZATION ---
+    print(f"🔐 Initializing TradingView Guest Session...")
+    tv = TvDatafeed()
     print(f"✅ Session initialized. Ready to fetch data.")
-    # ---------------------------
+    # ----------------------------------
     
     rate_limit_backoff = 60  # Start with 60 seconds
     consecutive_rate_limits = 0
@@ -71,21 +64,22 @@ async def run_trading_bot():
             
             print(f"🔔 Candle closed at {target_time.strftime('%H:%M:%S')}!")
             
-            # Wait an extra 5 seconds to ensure Yahoo Finance has fully updated its database
-            print(f"⏳ Waiting 5s for Yahoo Finance data refresh...")
+            # Wait an extra 5 seconds to ensure TradingView has fully updated its database
+            print(f"⏳ Waiting 5s for TradingView data refresh...")
             await asyncio.sleep(5)
             
             print(f"📊 Fetching data & checking signals...")
             
-            # Use the persistent session we created outside the loop!
-            df = nifty.history(period="10d", interval="5m")
+            # Fetch the last 150 5-minute candles using TradingView
+            df = tv.get_hist(symbol=TV_SYMBOL, exchange=TV_EXCHANGE, interval=Interval.in_5_minute, n_bars=150)
             
-            if not df.empty:
+            if df is not None and not df.empty:
                 candle_count = len(df)
                 print(f"✅ Data fetched: {candle_count} candles")
                 
                 df = df.reset_index()
-                df.rename(columns={'Datetime': 'time'}, inplace=True)
+                # TradingView returns 'datetime', we rename it to 'time' to match indicators.py
+                df.rename(columns={'datetime': 'time'}, inplace=True)
                 
                 processed_df = calculate_half_trend(df, amplitude=10, channel_deviation=2.0)
                 
@@ -111,8 +105,8 @@ async def run_trading_bot():
         except Exception as e:
             error_msg = str(e)
             
-            # Check if it's a rate limit error
-            if "Too Many Requests" in error_msg or "Rate limited" in error_msg:
+            # Keep your exponential backoff in case TradingView ever drops connection
+            if "Too Many Requests" in error_msg or "Rate limited" in error_msg or "429" in error_msg:
                 consecutive_rate_limits += 1
                 rate_limit_backoff = 60 * (2 ** (consecutive_rate_limits - 1))  # Exponential backoff
                 print(f"⚠️ Rate limited (attempt #{consecutive_rate_limits})!")
@@ -136,7 +130,7 @@ async def startup_event():
 @app.api_route("/", methods=["GET", "HEAD"])
 def read_root():
     """Respond to both GET and HEAD requests (for Render health checks)."""
-    return {"status": "Bot is perfectly synced and running!", "interval": "5 minutes (async-synced)"}
+    return {"status": "Bot is perfectly synced and running with TradingView!", "interval": "5 minutes (async-synced)"}
 
 @app.get("/ping")
 def ping():
