@@ -1,3 +1,8 @@
+import sys
+import os
+# Force Python to look in the site-packages directory
+sys.path.append(os.path.abspath("/opt/render/project/src/.venv/lib/python3.12/site-packages"))
+
 import asyncio
 import requests
 import pandas as pd
