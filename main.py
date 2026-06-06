@@ -32,33 +32,45 @@ async def run_trading_bot():
     """Asynchronous loop that syncs perfectly with 5-minute candle closes."""
     global last_signal_time
     
+    # --- ANTI-RATE LIMIT FIX ---
+    # 1. Create a persistent session so we don't spam Yahoo for new cookies
+    session = requests.Session()
+    # 2. Spoof a real web browser to bypass Yahoo's bot detection
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+    })
+    
+    # 3. Initialize the Ticker OUTSIDE the loop
+    print(f"🔐 Initializing Ticker with persistent session...")
+    nifty = yf.Ticker(TICKER_SYMBOL, session=session)
+    print(f"✅ Session initialized. Ready to fetch data.")
+    # ---------------------------
+    
     while True:
         try:
-            # 1. Calculate exactly how many seconds until the next 5-minute mark
+            # Calculate exactly how many seconds until the next 5-minute mark
             now = datetime.now()
             minutes_to_wait = 5 - (now.minute % 5)
             
-            # 2. Calculate the exact target time (e.g., 09:20:00)
             target_time = now.replace(minute=(now.minute + minutes_to_wait) % 60, second=0, microsecond=0)
             if minutes_to_wait + now.minute >= 60:
                 target_time = target_time + timedelta(hours=1)
                 
             sleep_seconds = (target_time - now).total_seconds()
             
-            # 3. Wait until the candle closes using ASYNC sleep (doesn't block Render!)
             if sleep_seconds > 0:
                 print(f"[{now.strftime('%H:%M:%S')}] ⏰ Waiting {sleep_seconds:.0f}s until candle close at {target_time.strftime('%H:%M:%S')}...")
                 await asyncio.sleep(sleep_seconds)
             
             print(f"🔔 Candle closed at {target_time.strftime('%H:%M:%S')}!")
             
-            # 4. Wait an extra 5 seconds to ensure Yahoo Finance has fully updated its database
+            # Wait an extra 5 seconds to ensure Yahoo Finance has fully updated its database
             print(f"⏳ Waiting 5s for Yahoo Finance data refresh...")
             await asyncio.sleep(5)
             
-            # 5. Fetch Data & Check Signals
             print(f"📊 Fetching data & checking signals...")
-            nifty = yf.Ticker(TICKER_SYMBOL)
+            
+            # Use the persistent session we created outside the loop!
             df = nifty.history(period="10d", interval="5m")
             
             if not df.empty:
@@ -94,7 +106,7 @@ async def run_trading_bot():
             import traceback
             traceback.print_exc()
             print(f"⏳ Waiting 60s before retry...")
-            await asyncio.sleep(60)  # If it fails, wait 1 minute and try again
+            await asyncio.sleep(60)  # Wait 1 min before retrying if rate limited again
 
 # --- FASTAPI ENDPOINTS ---
 
@@ -104,8 +116,9 @@ async def startup_event():
     asyncio.create_task(run_trading_bot())
     print("✅ Web server started. Background sync task launched!")
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def read_root():
+    """Respond to both GET and HEAD requests (for Render health checks)."""
     return {"status": "Bot is perfectly synced and running!", "interval": "5 minutes (async-synced)"}
 
 @app.get("/ping")
