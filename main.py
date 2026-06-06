@@ -1,22 +1,16 @@
-import sys
-import os
-# Force Python to look in the site-packages directory
-sys.path.append(os.path.abspath("/opt/render/project/src/.venv/lib/python3.12/site-packages"))
-
 import asyncio
 import requests
 import pandas as pd
 from datetime import datetime, timedelta
 from fastapi import FastAPI
-from tvdatafeed.main import TvDatafeed, Interval
 from indicators import calculate_half_trend
 
 app = FastAPI()
 
 # --- CONFIGURATION ---
 NTFY_TOPIC = "my_secret_nifty_bot_88"  # Your ntfy app topic name
-TV_SYMBOL = "NIFTY"                    # TradingView symbol
-TV_EXCHANGE = "NSE"                    # TradingView exchange
+TWELVEDATA_API_KEY = "6113e24b65ed4949b6204e7f8308ce7d"  # Put your free key here
+SYMBOL = "NIFTY:NSE"  # Twelve Data format for NSE Nifty 50
 
 last_signal_time = None
 
@@ -34,25 +28,71 @@ def send_alert(message: str, is_buy: bool):
     except Exception as e:
         print(f"❌ Failed to send alert: {e}")
 
-async def run_trading_bot():
-    """Asynchronous loop that syncs perfectly with 5-minute candle closes."""
+def fetch_and_analyze_data(force_alert=False):
+    """Fetches data from Twelve Data, processes it, and checks for signals."""
     global last_signal_time
     
-    # --- TRADINGVIEW INITIALIZATION ---
-    print(f"🔐 Initializing TradingView Guest Session...")
-    tv = TvDatafeed()
-    print(f"✅ Session initialized. Ready to fetch data.")
-    # ----------------------------------
+    url = f"https://api.twelvedata.com/time_series?symbol={SYMBOL}&interval=5min&outputsize=150&apikey={TWELVEDATA_API_KEY}"
     
-    rate_limit_backoff = 60  # Start with 60 seconds
-    consecutive_rate_limits = 0
+    response = requests.get(url)
+    data = response.json()
     
+    if "status" in data and data["status"] == "error":
+        print(f"❌ API Error: {data.get('message')}")
+        return {"status": "error", "message": data.get('message')}
+        
+    if "values" not in data:
+        print("📭 No data available or market closed.")
+        return {"status": "no_data"}
+
+    # Convert JSON to DataFrame
+    df = pd.DataFrame(data['values'])
+    
+    # Twelve Data sends the newest data FIRST. We must reverse it for the indicator.
+    df = df.iloc[::-1].reset_index(drop=True)
+    
+    # Rename datetime to time and convert prices to floats
+    df.rename(columns={'datetime': 'time'}, inplace=True)
+    for col in ['open', 'high', 'low', 'close']:
+        df[col] = df[col].astype(float)
+        
+    candle_count = len(df)
+    print(f"✅ Data fetched: {candle_count} candles")
+    
+    # Calculate HalfTrend
+    processed_df = calculate_half_trend(df, amplitude=10, channel_deviation=2.0)
+    
+    if len(processed_df) >= 2:
+        last_closed_bar = processed_df.iloc[-2]
+        current_bar_time = str(last_closed_bar['time'])
+        
+        # If this is a manual test, force a notification regardless of a new signal
+        if force_alert:
+            current_trend = "BULLISH 🟢" if last_closed_bar.get('halftrend_up') else "BEARISH 🔴"
+            msg = f"🧪 TEST SUCCESSFUL\nCurrent Trend: {current_trend}\nPrice: {last_closed_bar['close']:.2f}\nTime: {current_bar_time}"
+            send_alert(msg, is_buy=True)
+            return {"status": "test_alert_sent", "price": last_closed_bar['close']}
+
+        # Normal Bot Logic: Only alert on NEW signals
+        if current_bar_time != last_signal_time:
+            if last_closed_bar['buy_signal']:
+                msg = f"BUY SIGNAL\nPrice: {last_closed_bar['close']:.2f}\nTime: {current_bar_time}"
+                send_alert(msg, is_buy=True)
+                last_signal_time = current_bar_time
+                
+            elif last_closed_bar['sell_signal']:
+                msg = f"SELL SIGNAL\nPrice: {last_closed_bar['close']:.2f}\nTime: {current_bar_time}"
+                send_alert(msg, is_buy=False)
+                last_signal_time = current_bar_time
+                
+        return {"status": "success", "analyzed_time": current_bar_time}
+    else:
+        return {"status": "not_enough_data"}
+
+async def run_trading_bot():
+    """Asynchronous loop that syncs perfectly with 5-minute candle closes."""
     while True:
         try:
-            # Reset backoff if we successfully fetched data
-            consecutive_rate_limits = 0
-            rate_limit_backoff = 60
-            
             # Calculate exactly how many seconds until the next 5-minute mark
             now = datetime.now()
             minutes_to_wait = 5 - (now.minute % 5)
@@ -64,65 +104,19 @@ async def run_trading_bot():
             sleep_seconds = (target_time - now).total_seconds()
             
             if sleep_seconds > 0:
-                print(f"[{now.strftime('%H:%M:%S')}] ⏰ Waiting {sleep_seconds:.0f}s until candle close at {target_time.strftime('%H:%M:%S')}...")
+                print(f"[{now.strftime('%H:%M:%S')}] ⏰ Waiting {sleep_seconds:.0f}s until candle close...")
                 await asyncio.sleep(sleep_seconds)
             
-            print(f"🔔 Candle closed at {target_time.strftime('%H:%M:%S')}!")
-            
-            # Wait an extra 5 seconds to ensure TradingView has fully updated its database
-            print(f"⏳ Waiting 5s for TradingView data refresh...")
-            await asyncio.sleep(5)
+            print(f"🔔 Candle closed! Waiting 10s for API data refresh...")
+            # Wait 10 seconds to ensure Twelve Data has processed the newly closed candle
+            await asyncio.sleep(10)
             
             print(f"📊 Fetching data & checking signals...")
-            
-            # Fetch the last 150 5-minute candles using TradingView
-            df = tv.get_hist(symbol=TV_SYMBOL, exchange=TV_EXCHANGE, interval=Interval.in_5_minute, n_bars=150)
-            
-            if df is not None and not df.empty:
-                candle_count = len(df)
-                print(f"✅ Data fetched: {candle_count} candles")
-                
-                df = df.reset_index()
-                # TradingView returns 'datetime', we rename it to 'time' to match indicators.py
-                df.rename(columns={'datetime': 'time'}, inplace=True)
-                
-                processed_df = calculate_half_trend(df, amplitude=10, channel_deviation=2.0)
-                
-                if len(processed_df) >= 2:
-                    last_closed_bar = processed_df.iloc[-2]
-                    current_bar_time = str(last_closed_bar['time'])
-                    
-                    if current_bar_time != last_signal_time:
-                        if last_closed_bar['buy_signal']:
-                            msg = f"BUY SIGNAL\nPrice: {last_closed_bar['close']:.2f}\nTime: {current_bar_time}"
-                            send_alert(msg, is_buy=True)
-                            last_signal_time = current_bar_time
-                            
-                        elif last_closed_bar['sell_signal']:
-                            msg = f"SELL SIGNAL\nPrice: {last_closed_bar['close']:.2f}\nTime: {current_bar_time}"
-                            send_alert(msg, is_buy=False)
-                            last_signal_time = current_bar_time
-                else:
-                    print("⚠️ Not enough data to analyze")
-            else:
-                print("📭 No data available (Market closed or off-hours)")
+            fetch_and_analyze_data(force_alert=False)
 
         except Exception as e:
-            error_msg = str(e)
-            
-            # Keep your exponential backoff in case TradingView ever drops connection
-            if "Too Many Requests" in error_msg or "Rate limited" in error_msg or "429" in error_msg:
-                consecutive_rate_limits += 1
-                rate_limit_backoff = 60 * (2 ** (consecutive_rate_limits - 1))  # Exponential backoff
-                print(f"⚠️ Rate limited (attempt #{consecutive_rate_limits})!")
-                print(f"⏳ Waiting {rate_limit_backoff}s before retry (exponential backoff)...")
-                await asyncio.sleep(rate_limit_backoff)
-            else:
-                print(f"❌ Error in trading loop: {e}")
-                import traceback
-                traceback.print_exc()
-                print(f"⏳ Waiting 60s before retry...")
-                await asyncio.sleep(60)
+            print(f"❌ Error in trading loop: {e}")
+            await asyncio.sleep(60)
 
 # --- FASTAPI ENDPOINTS ---
 
@@ -134,10 +128,19 @@ async def startup_event():
 
 @app.api_route("/", methods=["GET", "HEAD"])
 def read_root():
-    """Respond to both GET and HEAD requests (for Render health checks)."""
-    return {"status": "Bot is perfectly synced and running with TradingView!", "interval": "5 minutes (async-synced)"}
+    return {"status": "Bot is running with Twelve Data!", "interval": "5 minutes"}
 
 @app.get("/ping")
 def ping():
     """Endpoint for cron-job.org to keep Render awake."""
     return {"status": "Awake"}
+
+@app.get("/test")
+def test_bot_pipeline():
+    """MANUAL TEST ENDPOINT: Visits this URL to force a data pull and mobile alert."""
+    print("🧪 Manual test triggered via /test endpoint")
+    result = fetch_and_analyze_data(force_alert=True)
+    return {
+        "message": "Test triggered. Check your phone!",
+        "api_result": result
+    }
