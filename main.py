@@ -46,8 +46,15 @@ async def run_trading_bot():
     print(f"✅ Session initialized. Ready to fetch data.")
     # ---------------------------
     
+    rate_limit_backoff = 60  # Start with 60 seconds
+    consecutive_rate_limits = 0
+    
     while True:
         try:
+            # Reset backoff if we successfully fetched data
+            consecutive_rate_limits = 0
+            rate_limit_backoff = 60
+            
             # Calculate exactly how many seconds until the next 5-minute mark
             now = datetime.now()
             minutes_to_wait = 5 - (now.minute % 5)
@@ -102,11 +109,21 @@ async def run_trading_bot():
                 print("📭 No data available (Market closed or off-hours)")
 
         except Exception as e:
-            print(f"❌ Error in trading loop: {e}")
-            import traceback
-            traceback.print_exc()
-            print(f"⏳ Waiting 60s before retry...")
-            await asyncio.sleep(60)  # Wait 1 min before retrying if rate limited again
+            error_msg = str(e)
+            
+            # Check if it's a rate limit error
+            if "Too Many Requests" in error_msg or "Rate limited" in error_msg:
+                consecutive_rate_limits += 1
+                rate_limit_backoff = 60 * (2 ** (consecutive_rate_limits - 1))  # Exponential backoff
+                print(f"⚠️ Rate limited (attempt #{consecutive_rate_limits})!")
+                print(f"⏳ Waiting {rate_limit_backoff}s before retry (exponential backoff)...")
+                await asyncio.sleep(rate_limit_backoff)
+            else:
+                print(f"❌ Error in trading loop: {e}")
+                import traceback
+                traceback.print_exc()
+                print(f"⏳ Waiting 60s before retry...")
+                await asyncio.sleep(60)
 
 # --- FASTAPI ENDPOINTS ---
 
