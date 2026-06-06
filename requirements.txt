@@ -3,7 +3,7 @@ uvicorn
 requests
 pandas
 numpy
-tvdatafeed @ git+https://github.com/rongardF/tvdatafeed
+git+https://github.com/rongardF/tvdatafeed.git
 
 
 

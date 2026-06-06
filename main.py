@@ -3,7 +3,7 @@ import requests
 import pandas as pd
 from datetime import datetime, timedelta
 from fastapi import FastAPI
-from tvdatafeed import TvDatafeed, Interval
+from tvdatafeed.main import TvDatafeed, Interval
 from indicators import calculate_half_trend
 
 app = FastAPI()
