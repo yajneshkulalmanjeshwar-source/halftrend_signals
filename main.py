@@ -11,9 +11,9 @@ app = FastAPI()
 # --- CONFIGURATION ---
 NTFY_TOPIC = "halftrend_signals"  # Replace with your actual ntfy app topic name
 TICKER_SYMBOL = "^NSEI"  # Yahoo Finance symbol for Nifty 50
-CHECK_INTERVAL_SECONDS = 600  # Check every 10 minutes to avoid rate limiting (was 5 min)
+CHECK_INTERVAL_SECONDS = 300  # Check every 5 minutes
 MAX_RETRIES = 3
-RETRY_DELAY_BASE = 5  # Start with 5 seconds, exponential backoff
+RETRY_DELAY_BASE = 2  # Start with 2 seconds for quick retries
 
 # Global variable to remember the last signal time so it doesn't spam you
 last_signal_time = None
@@ -28,39 +28,47 @@ def send_alert(message: str, is_buy: bool):
     }
     try:
         requests.post(url, data=message.encode('utf-8'), headers=headers, timeout=5)
-        print(f"Alert sent: {message}")
+        print(f"✅ Alert sent: {message}")
     except Exception as e:
-        print(f"Failed to send alert: {e}")
+        print(f"❌ Failed to send alert: {e}")
 
 def fetch_data_with_retry():
-    """Fetches Nifty 50 data from Yahoo Finance with exponential backoff retry logic."""
+    """Fetches Nifty 50 data from Yahoo Finance with retry logic."""
     for attempt in range(MAX_RETRIES):
         try:
-            print(f"Fetching latest data for {TICKER_SYMBOL}... (Attempt {attempt + 1}/{MAX_RETRIES})")
-            # Fetch 5 days of data, 5-minute candles
+            print(f"📊 Fetching {TICKER_SYMBOL}... (Attempt {attempt + 1}/{MAX_RETRIES})")
             nifty = yf.Ticker(TICKER_SYMBOL)
             df = nifty.history(period="5d", interval="5m")
             
-            if not df.empty:
+            if df is not None and not df.empty:
+                print(f"✅ Data fetched: {len(df)} candles")
                 return df
             else:
-                print("Warning: Empty dataframe returned from Yahoo Finance")
+                # Market closed or no data - this is normal during off-hours
+                print("⏸️ No data available (Market closed or off-hours) - will retry in next cycle")
+                return None
                 
         except Exception as e:
             error_msg = str(e).lower()
+            print(f"⚠️ Error on attempt {attempt + 1}: {e}")
             
             # Check for rate limiting specifically
             if "too many requests" in error_msg or "rate limit" in error_msg or "429" in error_msg:
-                wait_time = RETRY_DELAY_BASE * (2 ** attempt)  # Exponential backoff
-                print(f"⏳ Rate limited. Waiting {wait_time}s before retry...")
-                time.sleep(wait_time)
-                continue
+                if attempt < MAX_RETRIES - 1:
+                    wait_time = RETRY_DELAY_BASE * (2 ** attempt)  # 2s, 4s, 8s
+                    print(f"⏳ Rate limited. Waiting {wait_time}s before retry...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    print(f"❌ Rate limited after {MAX_RETRIES} attempts. Will try again in next cycle.")
+                    return None
             elif attempt < MAX_RETRIES - 1:
-                print(f"⚠️ Error: {e}. Retrying in 10 seconds...")
-                time.sleep(10)
+                # Other errors - quick retry
+                print(f"🔄 Retrying in 2 seconds...")
+                time.sleep(2)
                 continue
             else:
-                print(f"❌ Failed after {MAX_RETRIES} attempts: {e}")
+                print(f"❌ Failed after {MAX_RETRIES} attempts")
                 return None
     
     return None
@@ -69,9 +77,9 @@ def run_trading_bot():
     """Background loop that fetches data, checks HalfTrend, and sends alerts."""
     global last_signal_time
     
-    # Add initial delay to allow server to stabilize
-    print("Waiting 30 seconds before first fetch...")
-    time.sleep(30)
+    # Small initial delay to allow server to stabilize
+    print("⏳ Starting trading bot... (Initial 5 second delay)")
+    time.sleep(5)
     
     while True:
         try:
@@ -103,15 +111,17 @@ def run_trading_bot():
                             send_alert(msg, is_buy=False)
                             last_signal_time = current_bar_time
                 else:
-                    print("Warning: Not enough data to analyze (need at least 2 candles)")
+                    print("⚠️ Not enough data to analyze")
+            else:
+                print("📭 Skipping analysis - no data available")
 
         except Exception as e:
-            print(f"Error in trading loop: {e}")
+            print(f"❌ Error in trading loop: {e}")
             import traceback
             traceback.print_exc()
             
-        # Sleep until the next check (10 minutes to avoid rate limiting)
-        print(f"⏸️ Next check in {CHECK_INTERVAL_SECONDS} seconds...")
+        # Sleep until the next 5-minute check
+        print(f"⏰ Next check in {CHECK_INTERVAL_SECONDS} seconds...\n")
         time.sleep(CHECK_INTERVAL_SECONDS)
 
 # --- FASTAPI ENDPOINTS ---
@@ -121,11 +131,11 @@ def startup_event():
     """Starts the background bot loop when the server boots up."""
     thread = threading.Thread(target=run_trading_bot, daemon=True)
     thread.start()
-    print("Trading bot background thread started.")
+    print("✅ Trading bot background thread started.")
 
 @app.get("/")
 def read_root():
-    return {"status": "Bot is running perfectly on Yahoo Finance."}
+    return {"status": "Bot is running perfectly on Yahoo Finance.", "interval": "5 minutes"}
 
 @app.get("/ping")
 def ping():
