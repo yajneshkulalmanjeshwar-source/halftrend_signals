@@ -1,5 +1,4 @@
-import time
-import threading
+import asyncio
 import requests
 import pandas as pd
 import yfinance as yf
@@ -12,52 +11,8 @@ app = FastAPI()
 # --- CONFIGURATION ---
 NTFY_TOPIC = "halftrend_signals"  # Replace with your actual ntfy app topic name
 TICKER_SYMBOL = "^NSEI"  # Yahoo Finance symbol for Nifty 50
-CANDLE_INTERVAL_MINUTES = 5  # Check every 5 minutes aligned with market candles
-MAX_RETRIES = 3
-RETRY_DELAY_BASE = 2  # Start with 2 seconds for quick retries
 
-# Global variable to remember the last signal time so it doesn't spam you
 last_signal_time = None
-
-def get_next_candle_close_time():
-    """
-    Calculates the next 5-minute market candle close time.
-    Market candles close at: 9:15, 9:20, 9:25, 9:30, etc.
-    """
-    now = datetime.now()
-    
-    # Round to next 5-minute boundary
-    minutes = now.minute
-    seconds = now.second
-    microseconds = now.microsecond
-    
-    # Calculate minutes to next 5-minute boundary
-    minutes_to_next = (5 - (minutes % 5)) % 5
-    
-    if minutes_to_next == 0 and seconds == 0 and microseconds == 0:
-        # We're exactly on a boundary
-        next_close = now + timedelta(minutes=5)
-    elif minutes_to_next == 0:
-        # Same 5-minute block but need to wait for the close
-        next_close = now.replace(second=0, microsecond=0) + timedelta(minutes=5)
-    else:
-        # Wait for the next 5-minute boundary
-        next_close = now.replace(second=0, microsecond=0) + timedelta(minutes=minutes_to_next)
-    
-    return next_close
-
-def wait_for_next_candle_close():
-    """
-    Waits until the next market candle close time, then returns.
-    """
-    next_close = get_next_candle_close_time()
-    wait_seconds = (next_close - datetime.now()).total_seconds()
-    
-    if wait_seconds > 0:
-        print(f"⏰ Waiting {wait_seconds:.1f}s until candle close at {next_close.strftime('%H:%M:%S')}")
-        time.sleep(wait_seconds)
-    
-    return next_close
 
 def send_alert(message: str, is_buy: bool):
     """Sends a push notification to your iPhone via ntfy."""
@@ -73,88 +28,53 @@ def send_alert(message: str, is_buy: bool):
     except Exception as e:
         print(f"❌ Failed to send alert: {e}")
 
-def fetch_data_with_retry():
-    """Fetches Nifty 50 data from Yahoo Finance with retry logic."""
-    for attempt in range(MAX_RETRIES):
-        try:
-            print(f"📊 Fetching {TICKER_SYMBOL}... (Attempt {attempt + 1}/{MAX_RETRIES})")
-            nifty = yf.Ticker(TICKER_SYMBOL)
-            # Fetch 10 days to ensure sufficient warmup for ATR-100 calculation
-            df = nifty.history(period="10d", interval="5m")
-            
-            if df is not None and not df.empty:
-                candle_count = len(df)
-                print(f"✅ Data fetched: {candle_count} candles")
-                # ATR needs 100 candles minimum for meaningful values
-                if candle_count < 100:
-                    print(f"⚠️ WARNING: Only {candle_count} candles. ATR warmup may not be complete (need 100+)")
-                elif candle_count < 150:
-                    print(f"⚠️ NOTE: {candle_count} candles. Signals valid but not fully warmed up (optimal: 200+)")
-                else:
-                    print(f"✅ OPTIMAL: {candle_count} candles. Signals are reliable.")
-                return df
-            else:
-                # Market closed or no data - this is normal during off-hours
-                print("⏸️ No data available (Market closed or off-hours) - will retry in next cycle")
-                return None
-                
-        except Exception as e:
-            error_msg = str(e).lower()
-            print(f"⚠️ Error on attempt {attempt + 1}: {e}")
-            
-            # Check for rate limiting specifically
-            if "too many requests" in error_msg or "rate limit" in error_msg or "429" in error_msg:
-                if attempt < MAX_RETRIES - 1:
-                    wait_time = RETRY_DELAY_BASE * (2 ** attempt)  # 2s, 4s, 8s
-                    print(f"⏳ Rate limited. Waiting {wait_time}s before retry...")
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    print(f"❌ Rate limited after {MAX_RETRIES} attempts. Will try again in next cycle.")
-                    return None
-            elif attempt < MAX_RETRIES - 1:
-                # Other errors - quick retry
-                print(f"🔄 Retrying in 2 seconds...")
-                time.sleep(2)
-                continue
-            else:
-                print(f"❌ Failed after {MAX_RETRIES} attempts")
-                return None
-    
-    return None
-
-def run_trading_bot():
-    """Background loop that fetches data at market candle close times and checks HalfTrend."""
+async def run_trading_bot():
+    """Asynchronous loop that syncs perfectly with 5-minute candle closes."""
     global last_signal_time
-    
-    # Small initial delay to allow server to stabilize
-    print("⏳ Starting trading bot... (syncing with market candle times)")
-    time.sleep(5)
     
     while True:
         try:
-            # Wait for the next market candle close time
-            candle_close_time = wait_for_next_candle_close()
-            print(f"\n🔔 Candle closed at {candle_close_time.strftime('%H:%M:%S')}")
+            # 1. Calculate exactly how many seconds until the next 5-minute mark
+            now = datetime.now()
+            minutes_to_wait = 5 - (now.minute % 5)
             
-            df = fetch_data_with_retry()
+            # 2. Calculate the exact target time (e.g., 09:20:00)
+            target_time = now.replace(minute=(now.minute + minutes_to_wait) % 60, second=0, microsecond=0)
+            if minutes_to_wait + now.minute >= 60:
+                target_time = target_time + timedelta(hours=1)
+                
+            sleep_seconds = (target_time - now).total_seconds()
             
-            if df is not None and not df.empty:
-                # Format dataframe for our indicator function
+            # 3. Wait until the candle closes using ASYNC sleep (doesn't block Render!)
+            if sleep_seconds > 0:
+                print(f"[{now.strftime('%H:%M:%S')}] ⏰ Waiting {sleep_seconds:.0f}s until candle close at {target_time.strftime('%H:%M:%S')}...")
+                await asyncio.sleep(sleep_seconds)
+            
+            print(f"🔔 Candle closed at {target_time.strftime('%H:%M:%S')}!")
+            
+            # 4. Wait an extra 5 seconds to ensure Yahoo Finance has fully updated its database
+            print(f"⏳ Waiting 5s for Yahoo Finance data refresh...")
+            await asyncio.sleep(5)
+            
+            # 5. Fetch Data & Check Signals
+            print(f"📊 Fetching data & checking signals...")
+            nifty = yf.Ticker(TICKER_SYMBOL)
+            df = nifty.history(period="10d", interval="5m")
+            
+            if not df.empty:
+                candle_count = len(df)
+                print(f"✅ Data fetched: {candle_count} candles")
+                
                 df = df.reset_index()
                 df.rename(columns={'Datetime': 'time'}, inplace=True)
                 
-                # Apply HalfTrend (Amplitude 10, Channel 2)
                 processed_df = calculate_half_trend(df, amplitude=10, channel_deviation=2.0)
                 
-                # Look at the last fully closed candle (index -2)
                 if len(processed_df) >= 2:
                     last_closed_bar = processed_df.iloc[-2]
                     current_bar_time = str(last_closed_bar['time'])
                     
-                    # Check for signals, ensuring we haven't already alerted for this specific timestamp
                     if current_bar_time != last_signal_time:
-                        
                         if last_closed_bar['buy_signal']:
                             msg = f"BUY SIGNAL\nPrice: {last_closed_bar['close']:.2f}\nTime: {current_bar_time}"
                             send_alert(msg, is_buy=True)
@@ -167,25 +87,26 @@ def run_trading_bot():
                 else:
                     print("⚠️ Not enough data to analyze")
             else:
-                print("📭 Skipping analysis - no data available")
+                print("📭 No data available (Market closed or off-hours)")
 
         except Exception as e:
             print(f"❌ Error in trading loop: {e}")
             import traceback
             traceback.print_exc()
+            print(f"⏳ Waiting 60s before retry...")
+            await asyncio.sleep(60)  # If it fails, wait 1 minute and try again
 
 # --- FASTAPI ENDPOINTS ---
 
 @app.on_event("startup")
-def startup_event():
-    """Starts the background bot loop when the server boots up."""
-    thread = threading.Thread(target=run_trading_bot, daemon=True)
-    thread.start()
-    print("✅ Trading bot background thread started.")
+async def startup_event():
+    """Starts the bot natively in FastAPI's async event loop."""
+    asyncio.create_task(run_trading_bot())
+    print("✅ Web server started. Background sync task launched!")
 
 @app.get("/")
 def read_root():
-    return {"status": "Bot is running perfectly on Yahoo Finance.", "interval": "5 minutes (synced with market candle close)", "next_close": str(get_next_candle_close_time())}
+    return {"status": "Bot is perfectly synced and running!", "interval": "5 minutes (async-synced)"}
 
 @app.get("/ping")
 def ping():
