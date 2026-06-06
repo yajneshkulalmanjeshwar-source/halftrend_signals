@@ -9,7 +9,7 @@ from indicators import calculate_half_trend
 app = FastAPI()
 
 # --- CONFIGURATION ---
-NTFY_TOPIC = "halftrend_signals"  # Replace with your actual ntfy app topic name
+NTFY_TOPIC = "my_secret_nifty_bot_88"  # Replace with your actual ntfy app topic name
 TICKER_SYMBOL = "^NSEI"  # Yahoo Finance symbol for Nifty 50
 
 last_signal_time = None
