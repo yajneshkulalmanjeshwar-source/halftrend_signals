@@ -106,7 +106,7 @@ def analyze(force_alert: bool = False) -> dict:
                 "required": MIN_CANDLES,
             }
 
-        processed = calculate_half_trend(df, amplitude=10, channel_deviation=2.0)
+        processed = calculate_half_trend(df, amplitude=10, channel_deviation=3.0)
         if len(processed) < 2:
             return {"status": "not_enough_data"}
 
