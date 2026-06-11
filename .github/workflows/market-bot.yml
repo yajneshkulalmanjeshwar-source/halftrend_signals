@@ -57,6 +57,11 @@ jobs:
           restore-keys: |
             halftrend-bot-state-
 
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
       - name: Run HalfTrend bot
         env:
           ANGEL_API_KEY: ${{ secrets.ANGEL_API_KEY }}
