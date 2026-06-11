@@ -27,7 +27,7 @@ class AngelOneClient:
     def get_nifty_candles(
         self,
         interval: str = "FIVE_MINUTE",
-        days_back: int = 5,
+        days_back: int = 10,
     ) -> list:
         end = datetime.now(IST)
         start = end - timedelta(days=days_back)

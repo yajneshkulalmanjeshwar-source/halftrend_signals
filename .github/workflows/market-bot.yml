@@ -1,30 +1,39 @@
-# HalfTrend bot — runs every 5 min on weekdays (IST market window checked in bot.py)
+# HalfTrend bot for NIFTY 50 — scheduled automatically by GitHub Actions.
+# You do NOT need any external cron website (cron-job.org, etc.).
 #
-# GitHub repo → Settings → Secrets and variables → Actions → New repository secret:
-#   ANGEL_API_KEY        SmartAPI app key (smartapi.angelone.in)
-#   ANGEL_CLIENT_CODE    Angel One client ID
-#   ANGEL_PIN            Trading PIN / MPIN
-#   ANGEL_TOTP_SECRET    TOTP secret from enable-totp (not the 6-digit code)
-#   NTFY_TOPIC           Your ntfy.sh topic name
+# === ONE-TIME SETUP (GitHub repo → Settings → Secrets → Actions) ===
+#   ANGEL_API_KEY
+#   ANGEL_CLIENT_CODE
+#   ANGEL_PIN
+#   ANGEL_TOTP_SECRET
+#   NTFY_TOPIC          ← set exactly to: my_secret_nifty_bot_88
 #
-# Manual test: Actions tab → Market Bot → Run workflow → check "Force test alert"
+# === PHONE SETUP (ntfy app) ===
+#   Subscribe to topic: my_secret_nifty_bot_88
+#
+# === IST SCHEDULE ===
+# NSE 5m candles close at 09:20, 09:25, 09:30, ... 15:30 IST.
+# Bot runs 1 minute after each close (09:21, 09:26, ... 15:31 IST) so Angel One
+# has the finished candle. Signals always map to IST bars, not UTC clock drift.
+#
+# Manual test: Actions → Market Bot → Run workflow → enable "Force test alert"
 
 name: Market Bot
 
 on:
-  # Manual run: Actions → Market Bot → Run workflow (top right)
   workflow_dispatch:
     inputs:
       force_alert:
-        description: "Send a test ntfy alert"
+        description: "Send a test ntfy alert (ignores market hours)"
         type: boolean
-        default: true
-  # Auto-run when you push to main (helps first-time setup)
-  push:
-    branches: [main]
+        default: false
   schedule:
-    # UTC 03:00–10:30 Mon–Fri covers 09:15–15:30 IST (India has no DST)
-    - cron: "*/5 3-10 * * 1-5"
+    # IST 09:21 and 09:26
+    - cron: "51,56 3 * * 1-5"
+    # IST 09:31 through 15:26 (every 5 min)
+    - cron: "1,6,11,16,21,26,31,36,41,46,51,56 4-9 * * 1-5"
+    # IST 15:31 (final candle 15:25–15:30)
+    - cron: "1 10 * * 1-5"
 
 jobs:
   halftrend:
@@ -39,14 +48,14 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
       - name: Restore signal state
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
+        id: state-cache
         with:
           path: .bot_state.json
-          key: halftrend-bot-state
+          key: halftrend-bot-state-${{ github.run_number }}
+          restore-keys: |
+            halftrend-bot-state-
 
       - name: Run HalfTrend bot
         env:
@@ -55,6 +64,13 @@ jobs:
           ANGEL_PIN: ${{ secrets.ANGEL_PIN }}
           ANGEL_TOTP_SECRET: ${{ secrets.ANGEL_TOTP_SECRET }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
-          FORCE_ALERT: ${{ github.event.inputs.force_alert }}
+          FORCE_ALERT: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_alert || 'false' }}
           BOT_STATE_FILE: .bot_state.json
         run: python bot.py
+
+      - name: Save signal state
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: .bot_state.json
+          key: halftrend-bot-state-${{ github.run_number }}
